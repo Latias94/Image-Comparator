@@ -1,0 +1,57 @@
+//
+// Image Comparator. Copyright (c) 2021-2021 Latias94 (www.frankorz.com). See LICENSE.md
+// https://github.com/Latias94/ImageComparator/
+//
+
+#pragma kernel CSMain
+
+// Compute Shader 也定义好相关的结构
+struct CompareResult
+{
+    uint different;
+};
+
+shared Texture2D<float4> sourceTexture;
+shared Texture2D<float4> compareTexture;
+int bufferMaxWidth;
+
+// RWStructuredBuffer 是可读写流
+RWStructuredBuffer<CompareResult> resultBuffer;
+
+[numthreads(8,8,1)]
+void CSMain(uint3 id : SV_DispatchThreadID)
+{
+    uint textureWidth = sourceTexture.Length.x;
+    uint textureHeight = sourceTexture.Length.y;
+
+    if (id.x < textureWidth && id.y < textureHeight)
+    {
+        float4 sourcePixel = sourceTexture[id.xy];
+        float4 comparePixel = compareTexture[id.xy];
+        // 设定不同的相似度
+        // float pixelDifference = 0.001f;
+        // if (abs(sourcePixel.x - destPixel.x) > pixelDifference ||
+        //     abs(sourcePixel.y - destPixel.y) > pixelDifference ||
+        //     abs(sourcePixel.z - destPixel.z) > pixelDifference ||
+        //     abs(sourcePixel.w - destPixel.w) > pixelDifference )
+        // {
+        //     differentBlock++;
+        // }
+        
+        uint index = id.y * bufferMaxWidth + id.x;
+        if (
+            sourcePixel.x != comparePixel.x ||
+            sourcePixel.y != comparePixel.y ||
+            sourcePixel.z != comparePixel.z ||
+            sourcePixel.w != comparePixel.w
+        )
+        {
+            // 左下角为原点
+            resultBuffer[index].different = 1;
+        }
+        else
+        {
+            resultBuffer[index].different = 0;
+        }
+    }
+}
