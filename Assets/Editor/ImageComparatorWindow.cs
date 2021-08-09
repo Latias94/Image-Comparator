@@ -1,6 +1,6 @@
 //
 // Image Comparator. Copyright (c) 2021-2021 Latias94 (www.frankorz.com). See LICENSE.md
-// https://github.com/Latias94/ImageComparator/
+// https://github.com/Latias94/UnityImageComparator/
 //
 
 using System;

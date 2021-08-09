@@ -1,4 +1,4 @@
-﻿# Image Comparator
+﻿# Unity Image Comparator
 
 Unity 2021.1.0f1
 
