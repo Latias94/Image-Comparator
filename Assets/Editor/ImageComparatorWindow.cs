@@ -28,17 +28,54 @@ public class ImageComparatorWindow : EditorWindow
     /// 保存比较的两张图片的索引
     /// 索引从 _texturePaths, _textureGUIDs 获取路径和对应 GUID
     /// </summary>
-    struct PreProcessUnit
+    readonly struct PreProcessUnit
     {
         public readonly int sourceIndex;
         public readonly int compareIndex;
-        public Vector2Int textureSize; // width height
 
         public PreProcessUnit(int sourceIndex, int compareIndex)
         {
             this.sourceIndex = sourceIndex;
             this.compareIndex = compareIndex;
-            textureSize = Vector2Int.zero;
+        }
+    }
+    
+    [Serializable]
+    public class SerializeResult
+    {
+        public string sourcePath;
+        public string comparePath;
+        public long fileSize;
+
+        /// <summary>
+        /// 像素差异数量
+        /// </summary>
+        public uint differences;
+
+        public SerializeResult(string sourcePath, string comparePath, long fileSize, uint differences)
+        {
+            this.sourcePath = sourcePath;
+            this.comparePath = comparePath;
+            this.fileSize = fileSize;
+            this.differences = differences;
+        }
+    }
+    
+    [Serializable]
+    public class SerializeResultWrapper
+    {
+        public long totalFileSize;
+        public int totalSamePairCount;
+        public SerializeResult[] results;
+        public uint skipProcessCount;
+
+        public SerializeResultWrapper(long totalFileSize, int totalSamePairCount, SerializeResult[] results,
+            uint skipProcessCount)
+        {
+            this.totalFileSize = totalFileSize;
+            this.totalSamePairCount = totalSamePairCount;
+            this.results = results;
+            this.skipProcessCount = skipProcessCount;
         }
     }
 
@@ -77,9 +114,19 @@ public class ImageComparatorWindow : EditorWindow
     private const int MAX_TEXTURE_HEIGHT = 2048;
 
     /// <summary>
+    /// 当贴图数量超过多少时出现确认对话框
+    /// </summary>
+    private const int SHOW_DIALOG_MAX_COUNT = 4000;
+    /// <summary>
+    /// 输出 JSON 格式结果的文件路径 
+    /// </summary>
+    private string _saveJsonPath;
+    /// <summary>
     /// 真正走 Compute Shader 计算的次数（不同高度宽度的图片相比较会直接跳过）
     /// </summary>
     private uint _realCompareCount;
+    private uint _finishProcessCount = 0;
+    private uint _skipProcessCount = 0;
 
     private EditorCoroutine _coroutine;
 
@@ -146,6 +193,7 @@ public class ImageComparatorWindow : EditorWindow
 
         FindComputeShader();
         InitComputeShader();
+        _saveJsonPath = "Assets/ImageCompareResult.json";
     }
 
 
@@ -173,35 +221,48 @@ public class ImageComparatorWindow : EditorWindow
 
         _textureGUIDs = AssetDatabase.FindAssets("t:texture2D", paths);
 
-        _coroutine = this.StartCoroutine(StartProgram(_textureGUIDs));
+        int compareCount = _textureGUIDs.Length * _textureGUIDs.Length / 2;
+        var canStart = _textureGUIDs.Length < SHOW_DIALOG_MAX_COUNT ||
+                       EditorUtility.DisplayDialog("提示",
+                           $"共有美术贴图{_textureGUIDs.Length}个，将会对比{compareCount}次，可能需要较多时间，是否执行",
+                           "确定", "取消");
+
+        if (canStart)
+        {
+            _coroutine = this.StartCoroutine(StartProgram(_textureGUIDs));
+        }
     }
 
 
     private IEnumerator StartProgram(string[] textureGUIDs)
     {
-        int finishProcess = 0;
+        _finishProcessCount = 0;
         _realCompareCount = 0;
+        _skipProcessCount = 0;
         _totalSize = 0;
 
         var batch = CreateTasks(textureGUIDs, 128);
         _sameImagesInResult = new List<PreProcessUnit>();
+        
+        List<SerializeResult> serializeResults = new List<SerializeResult>();
 
         foreach (var units in batch)
         {
             FindDifferences(units, (data, differences) =>
             {
-                finishProcess++;
-                int totalPixels = data.textureSize.x * data.textureSize.y;
+                var textureSize = GetTextureSize(data.sourceIndex);
+                int totalPixels = textureSize.x * textureSize.y;
                 float differencePercentage = (float)differences / totalPixels;
                 if (differencePercentage <= _acceptDifferencePercentage)
                 {
+                    var sourcePath = _texturePaths[data.sourceIndex];
+                    var comparePath = _texturePaths[data.compareIndex];
                     _sameImagesInResult.Add(data);
                     // Debug.Log("不同像素数:" + differences);
-                    LogUnit(data, differencePercentage, differences);
+                    var fileSize = new FileInfo(sourcePath).Length;
+                    LogUnit(sourcePath, comparePath, fileSize, differencePercentage, differences);
+                    serializeResults.Add(new SerializeResult(sourcePath, comparePath, fileSize, differences));
                 }
-
-                EditorUtility.DisplayProgressBar("处理进度", $"{finishProcess} / {_allTasks.Count}",
-                    finishProcess / (float)_allTasks.Count);
             });
             yield return null;
         }
@@ -209,6 +270,13 @@ public class ImageComparatorWindow : EditorWindow
         _stopWatch.Stop();
         TimeSpan ts = _stopWatch.Elapsed;
         string elapsedTime = $"{ts.Hours:00}小时{ts.Minutes:00}分{ts.Seconds:00}秒{ts.Milliseconds / 10:00}毫秒";
+        
+        EditorUtility.DisplayProgressBar("保存数据到 Json 文件", $"Json 文件路径为： {_saveJsonPath}", 0);
+
+        SerializeResultWrapper resultWrapper =
+            new SerializeResultWrapper(_totalSize, serializeResults.Count, serializeResults.ToArray(),
+                _skipProcessCount);
+        WriteToJSON(resultWrapper);
 
         EditorUtility.ClearProgressBar();
 
@@ -219,14 +287,13 @@ public class ImageComparatorWindow : EditorWindow
         Debug.Log($"重复的大小（相同的两张纹理中一张的大小）为：{BytesToString(_totalSize)}");
     }
 
-    private void LogUnit(PreProcessUnit data, float differentPercentage, uint differences)
+    private void LogUnit(string sourcePath, string comparePath, long fileSize, float differentPercentage,
+        uint differences)
     {
-        var sourcePath = _texturePaths[data.sourceIndex];
-        var comparePath = _texturePaths[data.compareIndex];
-        var fileSize = new FileInfo(sourcePath).Length;
         _totalSize += fileSize;
         var fileSizeStr = BytesToString(fileSize);
-        Debug.Log($"大小:{fileSizeStr}, 像素差异数：{differences}, 相似度:{1 - differentPercentage:P} {sourcePath}\n {comparePath}");
+        Debug.Log(
+            $" 大小:{fileSizeStr},  像素差异数：{differences},  相似度:{1 - differentPercentage:P} {sourcePath}\n {comparePath}");
     }
 
     private void FindDifferences(List<PreProcessUnit> tasks, Action<PreProcessUnit, uint> callback)
@@ -235,6 +302,7 @@ public class ImageComparatorWindow : EditorWindow
         {
             var task = tasks[i];
             CheckAndExecute(task, callback);
+            _finishProcessCount++;
         }
     }
 
@@ -278,13 +346,20 @@ public class ImageComparatorWindow : EditorWindow
     {
         Texture2D sourceTexture = LoadTextureFromAssetDatabase(data.sourceIndex);
         Texture2D compareTexture = LoadTextureFromAssetDatabase(data.compareIndex);
-        if (!CheckIfTextureHaveSameSize(sourceTexture, compareTexture)) return;
-        data.textureSize = new Vector2Int(sourceTexture.width, sourceTexture.height);
-        _realCompareCount++;
+        if (!CheckIfTextureHaveSameSize(sourceTexture, compareTexture))
+        {
+            _skipProcessCount++;
+            return;
+        }
 
         SetTexturesToShader(sourceTexture, compareTexture);
 
-        uint totalDifference = ProcessComputeShader(data.textureSize);
+        EditorUtility.DisplayProgressBar("处理进度 ",
+            $"{_finishProcessCount} / {_allTasks.Count} 跳过:{_skipProcessCount} pixels:{sourceTexture.width}*{sourceTexture.height}",
+            _finishProcessCount / (float)_allTasks.Count);
+
+        uint totalDifference = ProcessComputeShader(GetTextureSize(sourceTexture));
+        _realCompareCount++;
 
         callback(data, totalDifference);
     }
@@ -296,6 +371,17 @@ public class ImageComparatorWindow : EditorWindow
         return texture2D;
     }
 
+    private Vector2Int GetTextureSize(int index)
+    {
+        var texture = LoadTextureFromAssetDatabase(index);
+        return GetTextureSize(texture);
+    }
+
+    private Vector2Int GetTextureSize(Texture2D texture)
+    {
+        return new Vector2Int(texture.width, texture.height);
+    }
+    
     private static bool CheckIfTextureHaveSameSize(Texture2D sourceTexture, Texture2D compareTexture)
     {
         if (sourceTexture == null || compareTexture == null) return false;
@@ -380,5 +466,13 @@ public class ImageComparatorWindow : EditorWindow
         }
 
         return totalDifference;
+    }
+    
+    private void WriteToJSON(SerializeResultWrapper result)
+    {
+        if (string.IsNullOrEmpty(_saveJsonPath)) return;
+        var jsonString = JsonUtility.ToJson(result);
+        // Debug.Log(jsonString);
+        File.WriteAllText(_saveJsonPath, jsonString);
     }
 }
